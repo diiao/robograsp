@@ -120,7 +120,7 @@ class OpenVLAClient:
         except Exception as e:
             error_msg = f"请求异常: {str(e)}"
             print(error_msg)
-            return {"error": "Exception", "message": error_msg}
+            return {"error": "Exception", "message": error_msg}  
     
     def parse_numpy_result(self, result_data: Any) -> np.ndarray:
         """
@@ -132,6 +132,7 @@ class OpenVLAClient:
         Returns:
             解析后的numpy数组
         """
+        print("inferrence result:  ",result_data)
         try:
             # 如果结果是字典，包含标准的numpy序列化格式
             if isinstance(result_data, dict):

@@ -115,7 +115,7 @@ class OpenVLAController:
 
 
 # -----------------------------------------------------------------------------
-# AUBO motion helper
+# AUBO motion helper  
 # -----------------------------------------------------------------------------
 
 
@@ -312,4 +312,4 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 if __name__ == "__main__":
     sys.exit(main())
 
-# python openvla_aubo_integration.py --instruction "抓取杯子" --server-url http://<openvla-host>:8000 --robot-ip <controller-ip>
+# python openvla_aubo_integration.py --instruction "把柠檬抓起来" --server-url http://100.64.51.46:8000 --robot-ip 192.168.100.200
