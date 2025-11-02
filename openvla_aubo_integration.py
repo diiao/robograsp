@@ -2,8 +2,9 @@
 # -*- coding: utf-8 -*-
 
 """
-End-to-end demo: capture an RGB image from a Mech-Eye camera, send it to a remote
-OpenVLA deployment, and drive an AUBO arm with the predicted Cartesian delta.
+Continuous robotics loop: capture RGB from a Mech-Eye camera, stream it to a remote
+OpenVLA deployment, and drive an AUBO arm with the predicted Cartesian delta until
+the operator stops execution.  All captured frames are recorded to a video file.
 
 The OpenVLA action is expected to contain seven float values:
   - indices [0:3]: translational deltas for the tool center point (meters)
@@ -22,6 +23,7 @@ import time
 from dataclasses import dataclass
 from typing import Optional, Sequence
 
+import cv2
 import numpy as np
 from PIL import Image
 
@@ -78,6 +80,29 @@ class MechEyeRGBSource:
         # Convert to RGB for OpenVLA consumption.
         rgb_image = bgr_image[..., ::-1]
         return rgb_image
+
+
+class VideoRecorder:
+    """Append frames to a video file using OpenCV."""
+
+    def __init__(self, output_path: str, fps: float) -> None:
+        self._output_path = output_path
+        self._fps = fps
+        self._writer: Optional[cv2.VideoWriter] = None
+
+    def append(self, frame_bgr: np.ndarray) -> None:
+        if frame_bgr.size == 0:
+            return
+        if self._writer is None:
+            height, width = frame_bgr.shape[:2]
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+            self._writer = cv2.VideoWriter(self._output_path, fourcc, self._fps, (width, height))
+        self._writer.write(frame_bgr)
+
+    def close(self) -> None:
+        if self._writer is not None:
+            self._writer.release()
+            self._writer = None
 
 
 # -----------------------------------------------------------------------------
@@ -249,41 +274,56 @@ def run_pipeline(args: argparse.Namespace) -> None:
         server_url=args.server_url,
         target_size=(args.image_width, args.image_height),
     )
+    video_path = args.video_path or f"mecheye_session_{time.strftime('%Y%m%d-%H%M%S')}.mp4"
+    recorder = VideoRecorder(output_path=video_path, fps=args.video_fps)
 
     camera_source.connect()
     try:
         with arm_controller:
-            rgb_image = camera_source.capture_rgb()
-            capture_complete_ts = time.time()
-            inference = vla_controller.infer(rgb_image, args.instruction)
-            inference_received_ts = time.time()
+            cycle_index = 0
+            try:
+                while True:
+                    cycle_index += 1
+                    print(f"\n=== 循环 {cycle_index} 开始 ===")
+                    rgb_image = camera_source.capture_rgb()
+                    capture_complete_ts = time.time()
 
-            delta = inference.action[:6]
-            gripper_signal = float(inference.action[6])
+                    bgr_frame = cv2.cvtColor(rgb_image, cv2.COLOR_RGB2BGR)
+                    recorder.append(bgr_frame)
 
-            print(f"OpenVLA action: {inference.action.tolist()}")
-            if args.verbose:
-                print(f"Raw response: {inference.raw_response}")
+                    inference = vla_controller.infer(rgb_image, args.instruction)
+                    inference_received_ts = time.time()
 
-            new_pose = arm_controller.move_by_cartesian_delta(
-                delta_action=delta,
-                translational_speed=args.move_speed,
-                translational_acc=args.move_acc,
-            )
-            print(f"Commanded new TCP pose: {new_pose}")
-            print(f"Gripper signal (not executed): {gripper_signal}")
+                    delta = inference.action[:6]
+                    gripper_signal = float(inference.action[6])
 
-            total_latency = inference_received_ts - capture_complete_ts
-            print(f"拍照结束到推理结果返回总耗时: {total_latency:.3f} 秒")
+                    print(f"OpenVLA action: {inference.action.tolist()}")
+                    if args.verbose:
+                        print(f"Raw response: {inference.raw_response}")
 
-            if inference.request_duration_sec is not None:
-                print(f"OpenVLA请求往返耗时: {inference.request_duration_sec:.3f} 秒")
-            if inference.inference_time_sec is not None:
-                print(f"OpenVLA推理耗时: {inference.inference_time_sec:.3f} 秒")
-            if inference.network_time_sec is not None:
-                print(f"网络传输耗时(估计): {inference.network_time_sec:.3f} 秒")
+                    new_pose = arm_controller.move_by_cartesian_delta(
+                        delta_action=delta,
+                        translational_speed=args.move_speed,
+                        translational_acc=args.move_acc,
+                    )
+                    print(f"Commanded new TCP pose: {new_pose}")
+                    print(f"Gripper signal (not executed): {gripper_signal}")
+
+                    total_latency = inference_received_ts - capture_complete_ts
+                    print(f"拍照结束到推理结果返回总耗时: {total_latency:.3f} 秒")
+
+                    if inference.request_duration_sec is not None:
+                        print(f"OpenVLA请求往返耗时: {inference.request_duration_sec:.3f} 秒")
+                    if inference.inference_time_sec is not None:
+                        print(f"OpenVLA推理耗时: {inference.inference_time_sec:.3f} 秒")
+                    if inference.network_time_sec is not None:
+                        print(f"网络传输耗时(估计): {inference.network_time_sec:.3f} 秒")
+            except KeyboardInterrupt:
+                print("\n检测到手动停止。保存录像并准备退出。")
     finally:
+        recorder.close()
         camera_source.disconnect()
+        print(f"录像已保存至: {video_path}")
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
@@ -319,6 +359,17 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--verbose",
         action="store_true",
         help="Dump the raw OpenVLA response.",
+    )
+    parser.add_argument(
+        "--video-path",
+        default=None,
+        help="Output path for the recorded camera video (default: autogenerated).",
+    )
+    parser.add_argument(
+        "--video-fps",
+        type=float,
+        default=5.0,
+        help="Frames per second for the recorded video.",
     )
     return parser.parse_args(argv)
 
