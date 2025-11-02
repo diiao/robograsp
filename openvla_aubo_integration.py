@@ -89,6 +89,9 @@ class MechEyeRGBSource:
 class OpenVLAInferenceResult:
     action: np.ndarray
     raw_response: object
+    request_duration_sec: Optional[float]
+    inference_time_sec: Optional[float]
+    network_time_sec: Optional[float]
 
 
 class OpenVLAController:
@@ -111,7 +114,16 @@ class OpenVLAController:
         action = self._client.parse_numpy_result(response)
         if action.shape[0] != 7:
             raise ValueError(f"Expected 7-element action, got shape {action.shape}")
-        return OpenVLAInferenceResult(action=action, raw_response=response)
+        request_duration = getattr(self._client, "last_request_duration", None)
+        inference_time = getattr(self._client, "last_inference_time", None)
+        network_time = getattr(self._client, "last_network_overhead", None)
+        return OpenVLAInferenceResult(
+            action=action,
+            raw_response=response,
+            request_duration_sec=request_duration,
+            inference_time_sec=inference_time,
+            network_time_sec=network_time,
+        )
 
 
 # -----------------------------------------------------------------------------
@@ -242,7 +254,9 @@ def run_pipeline(args: argparse.Namespace) -> None:
     try:
         with arm_controller:
             rgb_image = camera_source.capture_rgb()
+            capture_complete_ts = time.time()
             inference = vla_controller.infer(rgb_image, args.instruction)
+            inference_received_ts = time.time()
 
             delta = inference.action[:6]
             gripper_signal = float(inference.action[6])
@@ -258,6 +272,16 @@ def run_pipeline(args: argparse.Namespace) -> None:
             )
             print(f"Commanded new TCP pose: {new_pose}")
             print(f"Gripper signal (not executed): {gripper_signal}")
+
+            total_latency = inference_received_ts - capture_complete_ts
+            print(f"拍照结束到推理结果返回总耗时: {total_latency:.3f} 秒")
+
+            if inference.request_duration_sec is not None:
+                print(f"OpenVLA请求往返耗时: {inference.request_duration_sec:.3f} 秒")
+            if inference.inference_time_sec is not None:
+                print(f"OpenVLA推理耗时: {inference.inference_time_sec:.3f} 秒")
+            if inference.network_time_sec is not None:
+                print(f"网络传输耗时(估计): {inference.network_time_sec:.3f} 秒")
     finally:
         camera_source.disconnect()
 

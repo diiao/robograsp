@@ -14,6 +14,7 @@ import argparse
 import json
 from pathlib import Path
 from typing import Optional, Dict, Any
+import time
 
 import requests
 import json_numpy
@@ -30,6 +31,10 @@ class OpenVLAClient:
     def __init__(self, server_url: str = "http://localhost:8000"):
         self.server_url = server_url.rstrip('/')
         self.act_endpoint = f"{self.server_url}/act"
+        # 请求相关的性能指标
+        self.last_request_duration: Optional[float] = None
+        self.last_inference_time: Optional[float] = None
+        self.last_network_overhead: Optional[float] = None
     
     def preprocess_image(self, image_path: str, target_size: tuple = (256, 256)) -> np.ndarray:
         """
@@ -87,22 +92,48 @@ class OpenVLAClient:
             payload["unnorm_key"] = unnorm_key
         
         try:
+            request_start = time.time()
+            # 重置指标
+            self.last_request_duration = None
+            self.last_inference_time = None
+            self.last_network_overhead = None
+
             print(f"\n发送请求到: {self.act_endpoint}")
             print(f"指令: {instruction}")
             if unnorm_key:
                 print(f"反归一化键: {unnorm_key}")
-            
+
             # 发送POST请求
             response = requests.post(
                 self.act_endpoint,
                 json=payload,
                 timeout=30  # 30秒超时
             )
-            
+
+            self.last_request_duration = time.time() - request_start
+
             # 检查响应状态
             if response.status_code == 200:
                 result = response.json()
                 print("推理成功!")
+                inference_time = result.get("inference_time_seconds")
+                if inference_time is not None:
+                    try:
+                        self.last_inference_time = float(inference_time)
+                        network_overhead = self.last_request_duration - self.last_inference_time
+                        if network_overhead < 0:
+                            network_overhead = 0.0
+                        self.last_network_overhead = network_overhead
+                        print(f"推理耗时: {self.last_inference_time:.3f} 秒")
+                        print(f"HTTP往返耗时: {self.last_request_duration:.3f} 秒")
+                        print(f"网络传输耗时(估计): {self.last_network_overhead:.3f} 秒")
+                    except (TypeError, ValueError):
+                        self.last_inference_time = None
+                        self.last_network_overhead = None
+                        print("推理耗时字段无法解析")
+                else:
+                    if self.last_request_duration is not None:
+                        print(f"HTTP往返耗时: {self.last_request_duration:.3f} 秒")
                 return result
             else:
                 print(f"请求失败，状态码: {response.status_code}")
@@ -180,7 +211,12 @@ class OpenVLAClient:
                 # 如果字典中有直接的数组数据
                 if "action" in result_data:
                     action_data = result_data["action"]
+                    if isinstance(action_data, np.ndarray):
+                        if action_data.shape == (7,) or len(action_data) == 7:
+                            return action_data.astype(np.float32)
                     if isinstance(action_data, list) and len(action_data) == 7:
+                        return np.array(action_data, dtype=np.float32)
+                    if isinstance(action_data, tuple) and len(action_data) == 7:
                         return np.array(action_data, dtype=np.float32)
             
             # 如果结果是字符串，尝试解析base64编码的numpy数组
